@@ -1,3 +1,4 @@
+import contextlib
 import hashlib
 import json
 import os
@@ -43,6 +44,13 @@ REFINER_URL = (
 SAFETY_URL = "https://weights.replicate.delivery/default/sdxl/safety-1.0.tar"
 
 
+@contextlib.contextmanager
+def timer(msg: str) -> "Iterator[None]":
+    start = time.time()
+    yield
+    print(f"{msg} took {time.time() - start:.3f}s")
+
+
 class KarrasDPM:
     def from_config(config):
         return DPMSolverMultistepScheduler.from_config(config, use_karras_sigmas=True)
@@ -60,11 +68,10 @@ SCHEDULERS = {
 
 
 def download_weights(url, dest):
-    start = time.time()
-    print("downloading url: ", url)
-    print("downloading to: ", dest)
-    subprocess.check_call(["pget", "-x", url, dest], close_fds=False)
-    print("downloading took: ", time.time() - start)
+    with timer("downloading"):
+        print("downloading url: ", url)
+        print("downloading to: ", dest)
+        subprocess.check_call(["pget", "-x", url, dest], close_fds=False)
 
 
 class Predictor(BasePredictor):
@@ -92,19 +99,22 @@ class Predictor(BasePredictor):
 
         if not self.is_lora:
             print("Loading Unet")
-
-            new_unet_params = load_file(
-                os.path.join(local_weights_cache, "unet.safetensors")
-            )
-            # this should return _IncompatibleKeys(missing_keys=[...], unexpected_keys=[])
-            pipe.unet.load_state_dict(new_unet_params, strict=False)
+            with timer("Loading Unet"):
+                new_unet_params = load_file(
+                    os.path.join(local_weights_cache, "unet.safetensors")
+                )
+                # this should return _IncompatibleKeys(missing_keys=[...], unexpected_keys=[])
+                pipe.unet.load_state_dict(new_unet_params, strict=False)
 
         else:
             print("Loading Unet LoRA")
 
             unet = pipe.unet
 
-            tensors = load_file(os.path.join(local_weights_cache, "lora.safetensors"))
+            with timer("load lora safetesnors"):
+                tensors = load_file(
+                    os.path.join(local_weights_cache, "lora.safetensors")
+                )
 
             unet_lora_attn_procs = {}
             name_rank_map = {}
@@ -169,26 +179,32 @@ class Predictor(BasePredictor):
         print("Loading safety checker...")
         if not os.path.exists(SAFETY_CACHE):
             download_weights(SAFETY_URL, SAFETY_CACHE)
-        self.safety_checker = StableDiffusionSafetyChecker.from_pretrained(
-            SAFETY_CACHE, torch_dtype=torch.float16
-        ).to("cuda")
-        self.feature_extractor = CLIPImageProcessor.from_pretrained(FEATURE_EXTRACTOR)
+        with timer("Load safety checker into memory"):
+            self.safety_checker = StableDiffusionSafetyChecker.from_pretrained(
+                SAFETY_CACHE, torch_dtype=torch.float16
+            ).to("cuda")
+        with timer("Load feature extractor into memory"):
+            self.feature_extractor = CLIPImageProcessor.from_pretrained(
+                FEATURE_EXTRACTOR
+            )
 
         if not os.path.exists(SDXL_MODEL_CACHE):
             download_weights(SDXL_URL, SDXL_MODEL_CACHE)
 
         print("Loading sdxl txt2img pipeline...")
-        self.txt2img_pipe = DiffusionPipeline.from_pretrained(
-            SDXL_MODEL_CACHE,
-            torch_dtype=torch.float16,
-            use_safetensors=True,
-            variant="fp16",
-        )
+        with timer("Load sdxl into memory"):
+            self.txt2img_pipe = DiffusionPipeline.from_pretrained(
+                SDXL_MODEL_CACHE,
+                torch_dtype=torch.float16,
+                use_safetensors=True,
+                variant="fp16",
+            )
         self.is_lora = False
         if weights or os.path.exists("./trained-model"):
             self.load_trained_weights(weights, self.txt2img_pipe)
 
-        self.txt2img_pipe.to("cuda")
+        with timer("move sdxl to gpu"):
+            self.txt2img_pipe.to("cuda")
 
         print("Loading SDXL img2img pipeline...")
         self.img2img_pipe = StableDiffusionXLImg2ImgPipeline(
@@ -200,7 +216,8 @@ class Predictor(BasePredictor):
             unet=self.txt2img_pipe.unet,
             scheduler=self.txt2img_pipe.scheduler,
         )
-        self.img2img_pipe.to("cuda")
+        with timer("move img2img to gpu"):
+            self.img2img_pipe.to("cuda")
 
         print("Loading SDXL inpaint pipeline...")
         self.inpaint_pipe = StableDiffusionXLInpaintPipeline(
@@ -212,7 +229,8 @@ class Predictor(BasePredictor):
             unet=self.txt2img_pipe.unet,
             scheduler=self.txt2img_pipe.scheduler,
         )
-        self.inpaint_pipe.to("cuda")
+        with timer("move inpaint to gpu"):
+            self.inpaint_pipe.to("cuda")
 
         print("Loading SDXL refiner pipeline...")
         # FIXME(ja): should the vae/text_encoder_2 be loaded from SDXL always?
@@ -224,15 +242,16 @@ class Predictor(BasePredictor):
             download_weights(REFINER_URL, REFINER_MODEL_CACHE)
 
         print("Loading refiner pipeline...")
-        self.refiner = DiffusionPipeline.from_pretrained(
-            REFINER_MODEL_CACHE,
-            text_encoder_2=self.txt2img_pipe.text_encoder_2,
-            vae=self.txt2img_pipe.vae,
-            torch_dtype=torch.float16,
-            use_safetensors=True,
-            variant="fp16",
-        )
-        self.refiner.to("cuda")
+        with timer("Load refiner into memory"):
+            self.refiner = DiffusionPipeline.from_pretrained(
+                REFINER_MODEL_CACHE,
+                text_encoder_2=self.txt2img_pipe.text_encoder_2,
+                vae=self.txt2img_pipe.vae,
+                torch_dtype=torch.float16,
+                use_safetensors=True,
+                variant="fp16",
+            )
+            self.refiner.to("cuda")
         print("setup took: ", time.time() - start)
         # self.txt2img_pipe.__class__.encode_prompt = new_encode_prompt
 

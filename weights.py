@@ -127,4 +127,4 @@ class WeightsDownloadCache:
             print(e.output)
             self._rm_disk(dest)
             raise e
-        print(f"Downloaded weights in {time.time() - st} seconds")
+        print(f"Downloaded weights in {time.time() - st:.3f} seconds")
